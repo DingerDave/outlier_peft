@@ -113,6 +113,12 @@ class IntermediateOutputExtractor(nn.Module):
         """ Wrapper Class for extracting statistics from intermediate layers of a model."""
         super().__init__()
         self.model = model
+        
+        # WILLIAM COMMENTS 
+        # TODO: ALSO, we may want to have a functionality where, we can do this projection providing only indices of outliers. 
+        # ^^^ Further, we may want to do this so different layers have different down-projections. 
+        # That way we don't have to run save states every time and we can run the exp for random indices. 
+        
         if layers is None:
             self.layers = [module for module in self.model.named_modules()]
         else:
@@ -131,14 +137,19 @@ class IntermediateOutputExtractor(nn.Module):
         
     def save_outputs_hook(self, layer_id: str) -> Callable:
 
-        def fn(_, __, output):
+        def fn(_, __, output): 
             # runs at each hooked layer
             if self.running_raw_values[layer_id] is None:
                 # set the outputs
-                self.running_raw_values[layer_id] = output
+                self.running_raw_values[layer_id] = output.detach().cpu().numpy()
             else:
                 # concatenate the outputs
-                self.running_raw_values[layer_id] = torch.cat([self.running_raw_values[layer_id], output], dim=0)
+                 
+                
+                #WILLIAM COMMENT
+                # Changed from dim=0 to dim=1 to stack along the "num_tokens" dimension in the tensor. 
+                # We can't use any torch functions here.     
+                self.running_raw_values[layer_id] = np.concatenate([self.running_raw_values[layer_id], output.detach().cpu().numpy()], axis=1)
             
         return fn
 
@@ -159,15 +170,23 @@ class IntermediateOutputExtractor(nn.Module):
                     # If we haven't dealt with the squence length, we just take the classification token
                     values = values.detach().cpu().numpy()[:,0,:]
                 else:
+                    # WILLIAM COMMENTS
+                    #^^^ To deal with sequence length, we can just reshape to -1, shape.[2] 
                     values = values.detach().cpu().numpy()
                 
             else:
                 # If our output is a tuple of tensors, we need to concatenate them and then detach them
-                values = np.concatenate([outputs.last_hidden_state.detach().numpy()[:, 0, :] for outputs in values])
+                print("Values")
+                print(values.shape)
+                values = np.reshape(values, (-1, values.shape[-1]))
+                #values = np.concatenate([outputs.last_hidden_state.detach().numpy()[:, 0, :] for outputs in values])
                 
             # Compute the mean and std of the outputs across all examples    
             std = np.std(values, axis=0).astype(float)
             means = np.mean(values, axis=0).astype(float)
+
+            print("std shape", std.shape)
+            print("means shape", means.shape)
 
             # Match each mean and std to its corresponding dimension, one indexed 
             # TODO: CHANGE TO ZERO INDEXED
@@ -200,12 +219,23 @@ class IntermediateOutputExtractor(nn.Module):
         # For now working with dense layers we can just set the weights to 0 and the biases to the mean value of the output
         # TODO: When doing this we still have to compute the whole thing which is unnecessary. Develop some sort of adaptive dense layer
         #           that's a good name actually, AdaptiveDenseLayer
-        idx_means = [torch.tensor([0]*layer.weight.data.shape[1], dtype=weight_type, device="cuda") if idx not in top_layers_idx  else kept_weights[idx] for idx in range(1, len(mean_vals)+1)]
-        idx_biases = [torch.tensor(mean_vals[idx], dtype=weight_type, device="cuda") if idx not in top_layers_idx else kept_biases[idx] for idx in range(1, len(mean_vals)+1)]
         
+        # WILLIAM COMMENTS:
+        # Right now, we are making the matices sparse, 
+        # 
+        # FOR device we will have to specify GPU_ID not the specific device
+        idx_means = [torch.tensor([0]*layer.weight.data.shape[1], dtype=weight_type, device="cuda:0") if idx not in top_layers_idx  else kept_weights[idx] for idx in range(1, len(mean_vals)+1)]
+        idx_biases = [torch.tensor(mean_vals[idx], dtype=weight_type, device="cuda:0") if idx not in top_layers_idx else kept_biases[idx] for idx in range(1, len(mean_vals)+1)]
+        
+
         # Set the weights and biases
-        layer.weight.data = torch.stack(idx_means)
-        layer.bias.data = torch.tensor(idx_biases)
+        # WILLIAM COMMENT:
+        # Need to send to device as well.
+        
+        print("Is layer cuda", layer.weight.data.is_cuda)
+        
+        layer.weight.data = torch.stack(idx_means) #.to("cuda:0")
+        layer.bias.data = torch.tensor(idx_biases) #.to("cuda:0")
         
     def down_sample_model(self, layers: list = None, n: int = 8) -> None:
 
@@ -234,26 +264,35 @@ def main(rank: int, config: dict, world_size: int):
     # Sow seeds  
     sow_seeds(int(config.seed))
     print("SEED", config.seed) 
-    if config.task == 'squad': 
-        model, train_data, eval_data, raw_data, optimizer = load_squad_objs(config) 
-    else:
-        model, train_data, eval_data, optimizer = load_classification_objs(config)
 
-        # DAVE TEST CODE BELOW
-        # model, train_data, eval_data, optimizer = load_classification_objs(config, save_path = "./models/bert_1_sst2.pth")
-        # from pprint import pprint
-        # train_loader = prepare_dataloader(config, train_data)
-        # eval_loader = prepare_dataloader(config, eval_data, is_eval=True) 
-        # inter_outputs = IntermediateOutputExtractor(model, layers = ["bert.encoder.layer.11.intermediate.dense"])
-        # data_gen = iter(train_loader)
-        # for i in range(4):
-        #     inter_outputs(next(data_gen))
-        # outputs = inter_outputs(next(data_gen))
-        
-        # inter_outputs(next(iter(train_loader)))
-        # inter_outputs.down_sample_model(n=8)
-        # return
+    # DAVE TEST CODE BELOW
+    model, train_data, eval_data, optimizer = load_classification_objs(config)
+     
+    # from pprint import pprint
+    train_loader = prepare_dataloader(config, train_data)
+    eval_loader = prepare_dataloader(config, eval_data, is_eval=True) 
+    inter_outputs = IntermediateOutputExtractor(model, layers = ["bert.encoder.layer.11.intermediate.dense"])
+     
+    
+    data_gen = iter(train_loader)
+    for i in range(2):
+         inter_outputs(next(data_gen))
+    outputs = inter_outputs(next(data_gen))
+
+    model.to("cuda:0")
+
+    print("OUTPUTS", outputs)
+    
+    inter_outputs(next(iter(train_loader)))
+    inter_outputs.down_sample_model(n=8)
+    
+    print(inter_outputs) 
+    
+    err
+
+    
     # Create dataloaders 
+    """
     train_loader = prepare_dataloader(config, train_data) 
     eval_loader = prepare_dataloader(config, eval_data, is_eval=True)  
 
@@ -261,7 +300,8 @@ def main(rank: int, config: dict, world_size: int):
     
     trainer.train()
     destroy_process_group()
-
+    """
+    
 if __name__  == "__main__":
     # Argparser to create config 
     parser = argparse.ArgumentParser()
