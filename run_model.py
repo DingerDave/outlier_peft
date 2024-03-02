@@ -86,7 +86,7 @@ class Trainer:
         """ 
         Saves model checkpoint to PATH 
         """ 
-        PATH = "models/" + self.config.model_name + "_" + str(self.config.seed) + "_" + self.config.task + ".pth"
+        PATH = "../peft_models/" + self.config.model_name + "_" + str(self.config.seed) + "_" + self.config.task + ".pth"
         torch.save(self.model.module.state_dict(), PATH)
         print("MODEL SAVED")
       
@@ -176,8 +176,6 @@ class IntermediateOutputExtractor(nn.Module):
                 
             else:
                 # If our output is a tuple of tensors, we need to concatenate them and then detach them
-                print("Values")
-                print(values.shape)
                 values = np.reshape(values, (-1, values.shape[-1]))
                 #values = np.concatenate([outputs.last_hidden_state.detach().numpy()[:, 0, :] for outputs in values])
                 
@@ -185,13 +183,10 @@ class IntermediateOutputExtractor(nn.Module):
             std = np.std(values, axis=0).astype(float)
             means = np.mean(values, axis=0).astype(float)
 
-            print("std shape", std.shape)
-            print("means shape", means.shape)
-
             # Match each mean and std to its corresponding dimension, one indexed 
             # TODO: CHANGE TO ZERO INDEXED
             ranked_std = list(sorted(zip(list(range(1, len(std)+1)), std), key=lambda x: x[1], reverse=True))
-            ranked_means = list(sorted(zip(list(range(1, len(means)+1)), means), key=lambda x: x[1], reverse=True))
+            ranked_means = list(sorted(zip(list(range(1, len(means)+1)), means), key=lambda x: x[1], reverse=True)) 
 
             # We store all these stats in a class dictionary for access later
             self.layer_output_std.update({name: ranked_std})
@@ -221,19 +216,15 @@ class IntermediateOutputExtractor(nn.Module):
         #           that's a good name actually, AdaptiveDenseLayer
         
         # WILLIAM COMMENTS:
-        # Right now, we are making the matices sparse, 
-        # 
+        # Right now, we are making the matices sparse,  
         # FOR device we will have to specify GPU_ID not the specific device
         idx_means = [torch.tensor([0]*layer.weight.data.shape[1], dtype=weight_type, device="cuda:0") if idx not in top_layers_idx  else kept_weights[idx] for idx in range(1, len(mean_vals)+1)]
         idx_biases = [torch.tensor(mean_vals[idx], dtype=weight_type, device="cuda:0") if idx not in top_layers_idx else kept_biases[idx] for idx in range(1, len(mean_vals)+1)]
         
-
         # Set the weights and biases
         # WILLIAM COMMENT:
         # Need to send to device as well.
-        
-        print("Is layer cuda", layer.weight.data.is_cuda)
-        
+                
         layer.weight.data = torch.stack(idx_means) #.to("cuda:0")
         layer.bias.data = torch.tensor(idx_biases) #.to("cuda:0")
         
@@ -271,36 +262,38 @@ def main(rank: int, config: dict, world_size: int):
     # from pprint import pprint
     train_loader = prepare_dataloader(config, train_data)
     eval_loader = prepare_dataloader(config, eval_data, is_eval=True) 
-    inter_outputs = IntermediateOutputExtractor(model, layers = ["bert.encoder.layer.11.intermediate.dense"])
-     
     
-    data_gen = iter(train_loader)
-    for i in range(2):
-         inter_outputs(next(data_gen))
-    outputs = inter_outputs(next(data_gen))
+    # DAVIDS CODE: Run intermediate output extractor. 
+    #inter_outputs = IntermediateOutputExtractor(model, layers = ["bert.encoder.layer.11.intermediate.dense", "bert.encoder.layer.10.intermediate.dense", "bert.encoder.layer.3.intermediate.dense"])
+    #model.to("cuda:0") 
+    #inter_outputs(next(iter(train_loader)))
+    #inter_outputs.down_sample_model(n=8) 
+    #trainer = Trainer(config, inter_outputs.model, train_loader, eval_loader, optimizer, rank)    
+    # Create dataloaders
 
-    model.to("cuda:0")
+    #WILLIAMS CODE:
 
-    print("OUTPUTS", outputs)
-    
-    inter_outputs(next(iter(train_loader)))
-    inter_outputs.down_sample_model(n=8)
-    
-    print(inter_outputs) 
-    
-    err
+    #STEP 1: "pre-process" model weights by down-projecting specified layers. 
+    # will clean this up layer, but can specify layer indices in the config, then run this function. 
+    # outliers is a tensor of dimension indices. 
+    outliers = torch.tensor([0,1,2])
+    # This downsamples IN PLACE 
+    outlier_project_bert(model.bert.encoder.layer[11], outliers)
+
+    # STEP 2: Make the layers that were projected above AdaptiveLayers. 
+    model.bert.encoder.layer[11] = AdaptiveBertLayer(model.bert.encoder.layer[11], outliers)
+
 
     
-    # Create dataloaders 
-    """
-    train_loader = prepare_dataloader(config, train_data) 
-    eval_loader = prepare_dataloader(config, eval_data, is_eval=True)  
+    # STEP 3: Train like normal 
 
-    trainer = Trainer(config, model, train_loader, eval_loader, optimizer, rank)
-    
+    trainer = Trainer(config, model, train_loader, eval_loader, optimizer, rank)   
+
     trainer.train()
+    print("Training done") 
+    
     destroy_process_group()
-    """
+
     
 if __name__  == "__main__":
     # Argparser to create config 
