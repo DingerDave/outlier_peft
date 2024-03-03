@@ -297,6 +297,8 @@ def main(rank: int, config: dict, world_size: int):
     
 if __name__  == "__main__":
     # Argparser to create config 
+    print("Running")
+    quit()
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_epochs", default=2, type=int)
     parser.add_argument("--batch_size", default=32, type=int) 
