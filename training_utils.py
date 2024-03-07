@@ -15,7 +15,6 @@ from transformers import GPTNeoXForSequenceClassification, GPTNeoXForQuestionAns
 from transformers import AdamW
 from datasets import load_dataset, load_metric  
 from transformers import default_data_collator
-import evaluate
 import collections
 
 # Pytorch stuff for DDP
@@ -27,7 +26,7 @@ import torch.multiprocessing as mp
 import argparse 
 import random 
 import os
-import wandb
+#import wandb
 
 # Custom Functions 
 #from analysis import * 
@@ -47,7 +46,7 @@ def prepare_dataloader(config, dataset, is_eval=False):
                 dataset,
                 batch_size = config.batch_size, 
                 pin_memory=True, 
-                sampler=DistributedSampler(dataset),
+                #sampler=DistributedSampler(dataset),
                 shuffle=False,
                 collate_fn=classification_collate_fn, 
                 num_workers=2)    

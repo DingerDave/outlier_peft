@@ -8,7 +8,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
 # Misc  
 import argparse 
-import wandb
+#import wandb
+import tqdm
 import typing
 from datasets import Dataset
 # Custom Functions 
@@ -42,7 +43,8 @@ class Trainer:
         self.optimizer = optimizer
         self.best_performance = 0
         self.steps = 0 
-        self.model = DDP(model, device_ids=[gpu_id]) 
+        #self.model = DDP(model, device_ids=[gpu_id]) 
+        self.model = model
         self.scaler = torch.cuda.amp.GradScaler()
         self.raw_data = raw_data
         self.squad_val = squad_val
@@ -76,9 +78,10 @@ class Trainer:
         Note: At the start of each epoch, we create a new shrinkage matrix to reflect changes in the models representations. 
         """ 
         b_sz = len(next(iter(self.train_data))['input_ids']) 
-        self.train_data.sampler.set_epoch(epoch)
+        #self.train_data.sampler.set_epoch(epoch)
         # Send everything to device and call run_batch 
-        for _, batch in enumerate(self.train_data):
+        print("Num_Iters", len(self.train_data))
+        for _, batch in tqdm.tqdm(enumerate(self.train_data)):
             batch = {key: value.to(self.gpu_id) for key, value in batch.items()}    
             self._run_batch(batch)
    
@@ -86,8 +89,9 @@ class Trainer:
         """ 
         Saves model checkpoint to PATH 
         """ 
-        PATH = "../peft_models/" + self.config.model_name + "_" + str(self.config.seed) + "_" + self.config.task + ".pth"
-        torch.save(self.model.module.state_dict(), PATH)
+        #PATH = "../peft_models/" + self.config.model_name + "_" + str(self.config.seed) + "_" + self.config.task + ".pth"
+        PATH = "./peft_models/" + self.config.model_name + "_" + str(self.config.seed) + "_" + self.config.task + ".pth"
+        torch.save(self.model.state_dict(), PATH)
         print("MODEL SAVED")
       
     def train(self): 
@@ -251,7 +255,7 @@ def main(rank: int, config: dict, world_size: int):
     results = {}   
     #wandb.init(project=config.model_name + "_" + config.task + "_seeds", name=str(config.seed))  
     # Training with DDP
-    ddp_setup(rank,world_size)   
+    #ddp_setup(rank,world_size)   
     # Sow seeds  
     sow_seeds(int(config.seed))
     print("SEED", config.seed) 
@@ -276,14 +280,16 @@ def main(rank: int, config: dict, world_size: int):
     #STEP 1: "pre-process" model weights by down-projecting specified layers. 
     # will clean this up layer, but can specify layer indices in the config, then run this function. 
     # outliers is a tensor of dimension indices. 
-    outliers = torch.tensor([0,1,2])
+    outliers = torch.tensor([557, 439, 98, 289, 261, 145, 746])
     # This downsamples IN PLACE 
-    outlier_project_bert(model.bert.encoder.layer[11], outliers)
-
+    
+    for i in range(8, 12):
+        outlier_project_bert(model.bert.encoder.layer[i], outliers)
+    
     # STEP 2: Make the layers that were projected above AdaptiveLayers. 
-    model.bert.encoder.layer[11] = AdaptiveBertLayer(model.bert.encoder.layer[11], outliers)
-
-
+        model.bert.encoder.layer[i] = AdaptiveBertLayer(model.bert.encoder.layer[i], outliers)
+    #model.bert.encoder.layer[10] = AdaptiveBertLayer(model.bert.encoder.layer[10], outliers)
+    
     
     # STEP 3: Train like normal 
 
@@ -297,7 +303,6 @@ def main(rank: int, config: dict, world_size: int):
     
 if __name__  == "__main__":
     # Argparser to create config 
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_epochs", default=2, type=int)
     parser.add_argument("--batch_size", default=32, type=int) 
@@ -310,4 +315,5 @@ if __name__  == "__main__":
     config = parser.parse_args() 
     
     world_size = torch.cuda.device_count()
-    mp.spawn(main, args=(config, world_size), nprocs=world_size) 
+    #mp.spawn(main, args=(config, world_size), nprocs=world_size) 
+    main(0, config, world_size)

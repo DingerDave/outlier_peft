@@ -129,11 +129,11 @@ def outlier_project_bert(layer, in_outliers, out_outliers=False):
 
     # Dense
     layer.output.dense.weight = torch.nn.Parameter(layer.output.dense.weight[out_outliers,:]) #torch.nn.Parameter(torch.ones(outliers_shape,3072))
-    layer.output.dense.bias = torch.nn.Parameter(layer.output.dense.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))
+    #layer.output.dense.bias = torch.nn.Parameter(layer.output.dense.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))
     # LayerNorm
-    layer.output.LayerNorm.weight = torch.nn.Parameter(layer.output.LayerNorm.weight[out_outliers])  #torch.nn.Parameter(torch.ones(outliers_shape))
-    layer.output.LayerNorm.bias = torch.nn.Parameter(layer.output.LayerNorm.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))
-    layer.output.LayerNorm.normalized_shape = (out_outliers.shape[0],)
+    #layer.output.LayerNorm.weight = torch.nn.Parameter(layer.output.LayerNorm.weight[out_outliers])  #torch.nn.Parameter(torch.ones(outliers_shape))
+    #layer.output.LayerNorm.bias = torch.nn.Parameter(layer.output.LayerNorm.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))
+    #layer.output.LayerNorm.normalized_shape = (out_outliers.shape[0],)
 
     return None
 
@@ -167,12 +167,13 @@ class UpSampleOutput(torch.nn.Module):
     def __init__(self, idx):
         super().__init__()
         self.idx = idx
+        
     # WE can have different padding if we want. 
     def forward(self, x, attention_output):
         # zero padding... for now.
         # Write some code to specify device. Just being lazy now. 
         upsampled_output = torch.zeros(attention_output.shape).to("cuda:0")
-        upsampled_output[:,:,self.idx] = x
+        upsampled_output[:,:,self.idx] = x.type(torch.float32)
         
         # this is how we would do attention padding. 
         """
@@ -216,7 +217,18 @@ class AdaptiveBertLayer(torch.nn.Module):
         # note that we rely on the config from the LAYER. 
         self.intermediate =  layer.intermediate
         # note that we rely on the config from the LAYER. 
-        self.output = layer.output
+        # Set our output dense to be the dense Layer from the layer.
+        self.output_dense = layer.output.dense
+        
+        # Seperate the bias from the weights.
+        self.output_bias = self.output_dense.bias
+
+        # Set the bias to None so that we can add our own bias.
+        self.output_dense.bias = None
+
+        # Get the layerNorm
+        self.output_layerNorm = layer.output.LayerNorm
+
         # our function
         self.up_sample_output = UpSampleOutput(idx)
         
@@ -269,8 +281,21 @@ class AdaptiveBertLayer(torch.nn.Module):
         return outputs
 
     def feed_forward_chunk(self, attention_output):
+        # Down sample the attention output
         down_sample_attention = self.down_sample_attention(attention_output)
+
+        # Comput the intermediates
         intermediate_output = self.intermediate(down_sample_attention)
-        layer_output = self.output(intermediate_output, down_sample_attention)
-        up_sample_output = self.up_sample_output(layer_output, attention_output)
-        return up_sample_output
+
+        # Apply the final dense 
+        layer_dense_output = self.output_dense(intermediate_output)
+        
+        # Upsample the output
+        up_sample_output = self.up_sample_output(layer_dense_output, attention_output)
+
+        # add the bias
+        layer_output = up_sample_output + self.output_bias
+
+        # apply layer norm
+        layer_output = self.output_layerNorm(layer_output+attention_output)
+        return layer_output

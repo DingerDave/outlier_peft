@@ -1,0 +1,4 @@
+__pycache__/*
+Dave_*
+peft_models/*
+train_env/*
