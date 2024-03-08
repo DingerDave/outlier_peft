@@ -262,7 +262,7 @@ def main(rank: int, config: dict, world_size: int):
 
     # DAVE TEST CODE BELOW
     model, train_data, eval_data, optimizer = load_classification_objs(config)
-     
+    print(model)
     # from pprint import pprint
     train_loader = prepare_dataloader(config, train_data)
     eval_loader = prepare_dataloader(config, eval_data, is_eval=True) 
@@ -279,20 +279,30 @@ def main(rank: int, config: dict, world_size: int):
 
     #STEP 1: "pre-process" model weights by down-projecting specified layers. 
     # will clean this up layer, but can specify layer indices in the config, then run this function. 
-    # outliers is a tensor of dimension indices. 
-    outliers = torch.tensor([557, 439, 98, 289, 261, 145, 746])
-    # This downsamples IN PLACE 
-    
-    for i in range(8, 12):
-        outlier_project_bert(model.bert.encoder.layer[i], outliers)
-    
-    # STEP 2: Make the layers that were projected above AdaptiveLayers. 
-        model.bert.encoder.layer[i] = AdaptiveBertLayer(model.bert.encoder.layer[i], outliers)
+    # outliers is a tensor of dimension indices.
+    if config.model_name == "bert": 
+        outliers = torch.tensor([557, 439, 98, 289, 261, 145, 746])
+        # This downsamples IN PLACE 
+        
+        for i in range(8, 12):
+            outlier_project_bert(model.bert.encoder.layer[i], outliers)
+        
+        # STEP 2: Make the layers that were projected above AdaptiveLayers. 
+            model.bert.encoder.layer[i] = AdaptiveBertLayer(model.bert.encoder.layer[i], outliers)
+    elif config.model_name == "gpt2":
+        outliers = torch.tensor([496,430,36,314])
+        # This downsamples IN PLACE 
+        
+        for i in range(8, 12):
+            outlier_project_gpt2(model.transformer.h[i].mlp, outliers)
+        
+        # STEP 2: Make the layers that were projected above AdaptiveLayers. 
+            model.transformer.h[i].mlp = AdaptiveGPT2Layer(model.transformer.h[i].mlp, outliers)
     #model.bert.encoder.layer[10] = AdaptiveBertLayer(model.bert.encoder.layer[10], outliers)
     
     
     # STEP 3: Train like normal 
-
+    
     trainer = Trainer(config, model, train_loader, eval_loader, optimizer, rank)   
 
     trainer.train()

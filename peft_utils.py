@@ -282,8 +282,9 @@ class AdaptiveBertLayer(torch.nn.Module):
 
     def feed_forward_chunk(self, attention_output):
         # Down sample the attention output
+        
         down_sample_attention = self.down_sample_attention(attention_output)
-
+        
         # Comput the intermediates
         intermediate_output = self.intermediate(down_sample_attention)
 
@@ -299,3 +300,127 @@ class AdaptiveBertLayer(torch.nn.Module):
         # apply layer norm
         layer_output = self.output_layerNorm(layer_output+attention_output)
         return layer_output
+    
+
+#---------------------------------------GPT2----------------------------------------------#
+
+def outlier_project_gpt2(layer, in_outliers, out_outliers=False):
+    """
+    Given a layer, we only select the weights corresponding to outlier dimension subspaces. 
+    For now, I am allowing, us to specify differing outlier in the intermediate and output layers
+    Tho in practice, they look to be the same. 
+    """
+    
+    # if the out_outliers are not provided, we set them to be identitcal to the in_outliers
+    if not out_outliers:
+        out_outliers=in_outliers
+    
+    # Intermediates
+    layer.c_fc.weight = torch.nn.Parameter(layer.c_fc.weight[in_outliers,:]) 
+    #layer.c_fc.bias = torch.nn.Parameter(layer.c_fc.bias[in_outliers])
+    # We only touch this if we perform rank reduction on the weights. 
+    #layer.c_fc.bias = torch.nn.Parameter(layer.c_fc.bias[in_outliers]) 
+
+    # Dense
+    layer.c_proj.weight = torch.nn.Parameter(layer.c_proj.weight[:,out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape,3072))
+    layer.c_proj.bias = torch.nn.Parameter(layer.c_proj.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))
+    # LayerNorm
+    #layer.output.LayerNorm.weight = torch.nn.Parameter(layer.output.LayerNorm.weight[out_outliers])  #torch.nn.Parameter(torch.ones(outliers_shape))
+    #layer.output.LayerNorm.bias = torch.nn.Parameter(layer.output.LayerNorm.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))
+    #layer.output.LayerNorm.normalized_shape = (out_outliers.shape[0],)
+
+    return None
+
+
+class DownSampleAttention(torch.nn.Module):
+    
+    """
+    Super simple class to down sample by incides. This may be overkill to create a class for this but ¯\_(ツ)_/¯ 
+    """
+    
+    def __init__(self, idx):
+        super().__init__()
+        self.idx = idx
+
+    # INDEXING OPERATIONS ARE DIFFERENTIABLE. 
+    
+    def forward(self, x):
+        return x[:,:,self.idx]
+    
+class UpSampleOutput(torch.nn.Module):
+    
+    """
+    Here is where we can do a bunch of experimenting with padding. 
+    Right now, I am zero-padding
+    But I kinda feel like padding with the attention output will do well. 
+
+    I am holding off on average padding bc it will require addtional memory to store. 
+    It's not a TON of memory to do this, but still something to think about. 
+    """
+    
+    def __init__(self, idx):
+        super().__init__()
+        self.idx = idx
+        
+    # WE can have different padding if we want. 
+    def forward(self, x, attention_output):
+        # zero padding... for now.
+        # Write some code to specify device. Just being lazy now. 
+        upsampled_output = torch.zeros(attention_output.shape).to("cuda:0")
+        upsampled_output[:,:,self.idx] = x.type(torch.float32)
+        
+        # this is how we would do attention padding. 
+        """
+        Two ideas for attention-padding: 
+
+        1. replace attention output with output processed by AdaptiveLayer
+        attention_output[:,:,idx] = x
+        
+        OR
+
+        2. Add the adaptive layer weights to the attention output
+        attention_output[:,:,idx] += x
+        
+        
+        return attention_output
+        """
+        
+        return upsampled_output        
+
+class AdaptiveGPT2Layer(torch.nn.Module):
+    # add back config is we want. 
+    def __init__(self, layer, idx):
+        
+        """
+        This is just a prototype. Need to clean up. And- hopefully streamline code
+        
+        Look up config, but we are going to remove it for now. 
+        """
+        
+        
+        super().__init__()
+        self.chunk_size_feed_forward = 8 #config.chunk_size_feed_forward
+        self.seq_len_dim = 1
+        # note that we rely on the config from the LAYER. 
+        # can change to make it more general. 
+        
+        # our function
+        self.down_sample_attention = DownSampleAttention(idx)
+
+        # note that we rely on the config from the LAYER. 
+        self.c_fc = layer.c_fc
+        self.act = layer.act
+        self.c_proj = layer.c_proj
+        # our function
+        self.up_sample_output = UpSampleOutput(idx)
+        
+
+    def forward(self, hidden_states: Optional[Tuple[torch.FloatTensor]]) -> torch.FloatTensor:
+
+        outputs = self.down_sample_attention(hidden_states)
+    
+        outputs = self.c_fc(outputs)
+        outputs = self.act(outputs)
+        outputs = self.c_proj(outputs)
+        outputs = self.up_sample_output(outputs, hidden_states)
+        return outputs
