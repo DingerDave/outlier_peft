@@ -289,7 +289,7 @@ def main(rank: int, config: dict, world_size: int):
         
         # STEP 2: Make the layers that were projected above AdaptiveLayers. 
             model.bert.encoder.layer[i] = AdaptiveBertLayer(model.bert.encoder.layer[i], outliers)
-            
+
     elif config.model_name == "gpt2":
         outliers = torch.tensor([496,430,36,314])
         # This downsamples IN PLACE 
