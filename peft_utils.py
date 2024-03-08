@@ -316,7 +316,10 @@ def outlier_project_gpt2(layer, in_outliers, out_outliers=False):
         out_outliers=in_outliers
     
     # Intermediates
+    print("c_fc", layer.c_fc.weight.shape)
+    
     layer.c_fc.weight = torch.nn.Parameter(layer.c_fc.weight[in_outliers,:]) 
+    print(layer.c_fc.weight.shape)
     #layer.c_fc.bias = torch.nn.Parameter(layer.c_fc.bias[in_outliers])
     # We only touch this if we perform rank reduction on the weights. 
     #layer.c_fc.bias = torch.nn.Parameter(layer.c_fc.bias[in_outliers]) 
@@ -324,6 +327,7 @@ def outlier_project_gpt2(layer, in_outliers, out_outliers=False):
     # Dense
     layer.c_proj.weight = torch.nn.Parameter(layer.c_proj.weight[:,out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape,3072))
     layer.c_proj.bias = torch.nn.Parameter(layer.c_proj.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))
+    layer.c_proj.nf = len(out_outliers)
     # LayerNorm
     #layer.output.LayerNorm.weight = torch.nn.Parameter(layer.output.LayerNorm.weight[out_outliers])  #torch.nn.Parameter(torch.ones(outliers_shape))
     #layer.output.LayerNorm.bias = torch.nn.Parameter(layer.output.LayerNorm.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))

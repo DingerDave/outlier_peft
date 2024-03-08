@@ -289,6 +289,7 @@ def main(rank: int, config: dict, world_size: int):
         
         # STEP 2: Make the layers that were projected above AdaptiveLayers. 
             model.bert.encoder.layer[i] = AdaptiveBertLayer(model.bert.encoder.layer[i], outliers)
+            
     elif config.model_name == "gpt2":
         outliers = torch.tensor([496,430,36,314])
         # This downsamples IN PLACE 
@@ -317,7 +318,7 @@ if __name__  == "__main__":
     parser.add_argument("--num_epochs", default=2, type=int)
     parser.add_argument("--batch_size", default=32, type=int) 
     parser.add_argument("--task", default="sst2", type=str)
-    parser.add_argument("--model_name", default="bert", type=str)
+    parser.add_argument("--model_name", default="gpt2", type=str)
     parser.add_argument("--seed", default=1, type=int)
     # --training also takes the argument "Mini" which will train the model on a very small subset for debugging purposes.
     parser.add_argument("--training", default="True", type=str) 
