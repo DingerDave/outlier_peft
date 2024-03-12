@@ -19,6 +19,7 @@ import hickle
 from typing import Dict, Iterable, Callable, Optional
 import torch.nn as nn
 import json
+import yaml 
 
 def ddp_setup(rank, world_size):
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
@@ -90,7 +91,7 @@ class Trainer:
         Saves model checkpoint to PATH 
         """ 
         #PATH = "../peft_models/" + self.config.model_name + "_" + str(self.config.seed) + "_" + self.config.task + ".pth"
-        PATH = "./peft_models/" + self.config.model_name + "_" + str(self.config.seed) + "_" + self.config.task + ".pth"
+        PATH = "../peft_models/" + self.config.model_name + "_" + str(self.config.seed) + "_" + self.config.task + ".pth"
         torch.save(self.model.state_dict(), PATH)
         print("MODEL SAVED")
       
@@ -247,7 +248,6 @@ class IntermediateOutputExtractor(nn.Module):
             self.down_sample_layer(layer, n=n)
 
             
-
 def main(rank: int, config: dict, world_size: int):
     # Wandb init
     print(config) 
@@ -261,54 +261,116 @@ def main(rank: int, config: dict, world_size: int):
     print("SEED", config.seed) 
 
     # DAVE TEST CODE BELOW
-    model, train_data, eval_data, optimizer = load_classification_objs(config)
-    print(model)
-    # from pprint import pprint
+    model, train_data, eval_data = load_classification_objs(config)
     train_loader = prepare_dataloader(config, train_data)
     eval_loader = prepare_dataloader(config, eval_data, is_eval=True) 
-    
-    # DAVIDS CODE: Run intermediate output extractor. 
-    #inter_outputs = IntermediateOutputExtractor(model, layers = ["bert.encoder.layer.11.intermediate.dense", "bert.encoder.layer.10.intermediate.dense", "bert.encoder.layer.3.intermediate.dense"])
-    #model.to("cuda:0") 
-    #inter_outputs(next(iter(train_loader)))
-    #inter_outputs.down_sample_model(n=8) 
-    #trainer = Trainer(config, inter_outputs.model, train_loader, eval_loader, optimizer, rank)    
-    # Create dataloaders
 
-    #WILLIAMS CODE:
+    # @ David: I was planning on keeping the specific outliers for given layers in an "adaptive config" 
+    # mainly bc this is going to get very large if we have more models and more strategies for getting outlliers.  
+    # Load adaptive config -> What's the best way to do this? 
+
+    adaptive_config = {
+        
+        "bert-sst2": {
+            1: [557, 136, 15, 304, 562],
+            2: [557, 283, 136, 505, 562], 
+            3: [557, 283, 136, 505, 143], 
+            4: [557, 283, 136, 505, 455],
+            5: [557, 283, 136, 505, 455],
+            6: [557, 283, 136, 505, 455], 
+            7: [557, 283, 136, 505, 455], 
+            8: [557, 304, 136, 283, 138],
+            9: [557, 304, 138, 136, 98],
+            10: [557, 304, 138, 136, 609], 
+            11: [557, 609, 252, 455, 697]
+        },
+
+
+        "gpt2-sst2":{
+        1: [138, 378, 447, 64, 393],
+        2: [138, 447, 378, 64, 393], 
+        3: [447, 138, 378, 64, 393], 
+        4: [447, 138, 378, 64, 39],
+        5: [447, 138, 378, 373, 64],
+        6: [447, 138, 378, 373, 64], 
+        7: [447, 138, 378, 481, 373], 
+        8: [447, 138, 378, 481, 373],
+        9: [447, 138, 481, 373, 314],
+        10: [447, 138, 481, 378, 314], 
+        11: [447, 138, 481, 373, 496],  
+    } 
+    }
 
     #STEP 1: "pre-process" model weights by down-projecting specified layers. 
     # will clean this up layer, but can specify layer indices in the config, then run this function. 
     # outliers is a tensor of dimension indices.
-    if config.model_name == "bert": 
-        outliers = torch.tensor([557, 439, 98, 289, 261, 145, 746])
-        # This downsamples IN PLACE 
-        
-        for i in range(8, 12):
+    if config.model_name == "bert":  
+        adaptive_config = adaptive_config[config.model_name + "-" + config.task]
+        for i in config.layers:
+            outliers = torch.tensor(adaptive_config[i][:config.num_outliers])
             outlier_project_bert(model.bert.encoder.layer[i], outliers)
-        
+
         # STEP 2: Make the layers that were projected above AdaptiveLayers. 
             model.bert.encoder.layer[i] = AdaptiveBertLayer(model.bert.encoder.layer[i], outliers)
+        
+        # How was I freezing params before? I accidentally overwrote it lmao. 
+        # I did it better before. This is a little janky.
+        # STEP 3: Freeze all non-AdaptiveLayer FF parameter 
+        trainable_params = [model.bert.encoder.layer[i] for i in config.layers]
+        # ADD POOLER AND CLASSIFICATION HEAD TO TRAINABLE PARAMS
+        trainable_params.append(model.bert.pooler)
+        trainable_params.append(model.classifier)  
+        # FREEZE ALL params
+        for _, param in model.named_parameters():
+                param.requires_grad = False 
+        # UNFREEZE Adaptive Layer FFNs & Model classifier + pooler 
+        for layer in trainable_params:
+            for name, param in layer.named_parameters():
+                
+                """
+                if "attention" in name:
+                    continue 
+                """
+                
+                param.requires_grad = True
 
     elif config.model_name == "gpt2":
-        outliers = torch.tensor([496,430,36,314])
-        # This downsamples IN PLACE 
-        
-        for i in range(8, 12):
+        # This downsamples IN PLACE    
+        adaptive_config = adaptive_config[config.model_name + "-" + config.task]
+        for i in config.layers:
+            outliers = torch.tensor(adaptive_config[i][:config.num_outliers]) 
             outlier_project_gpt2(model.transformer.h[i].mlp, outliers)
         
         # STEP 2: Make the layers that were projected above AdaptiveLayers. 
             model.transformer.h[i].mlp = AdaptiveGPT2Layer(model.transformer.h[i].mlp, outliers)
-    #model.bert.encoder.layer[10] = AdaptiveBertLayer(model.bert.encoder.layer[10], outliers)
-    
-    
-    # STEP 3: Train like normal 
-    
+     
+        trainable_params = [model.transformer.h[i] for i in config.layers]
+        # ADD POOLER AND CLASSIFICATION HEAD TO TRAINABLE PARAMS
+        trainable_params.append(model.transformer.ln_f)
+        trainable_params.append(model.score)
+
+        # FREEZE ALL params
+        for _, param in model.named_parameters():
+                param.requires_grad = False 
+        # UNFREEZE Adaptive Layer FFNs & Model classifier + pooler 
+        for layer in trainable_params:
+            for name, param in layer.named_parameters():
+                param.requires_grad = True
+        
+        for name, param in model.named_parameters():
+            if param.requires_grad == True:
+                print("TRUE ", name)
+            else:
+                print("False", name) 
+
+    # Specifying the correct optimizer params
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=config.learning_rate)
+       
+    # STEP 4: Train like normal  
     trainer = Trainer(config, model, train_loader, eval_loader, optimizer, rank)   
 
     trainer.train()
     print("Training done") 
-    
     destroy_process_group()
 
     
@@ -319,12 +381,17 @@ if __name__  == "__main__":
     parser.add_argument("--batch_size", default=32, type=int) 
     parser.add_argument("--task", default="sst2", type=str)
     parser.add_argument("--model_name", default="gpt2", type=str)
-    parser.add_argument("--seed", default=1, type=int)
+    parser.add_argument("--seed", default=1, type=int)  
     # --training also takes the argument "Mini" which will train the model on a very small subset for debugging purposes.
     parser.add_argument("--training", default="True", type=str) 
     parser.add_argument("--learning_rate", default=1e-5, type=float)
+    
+    # AdaptiveLayer PARAMS
+    # Can specify specific layers or integers. "all" downsamples all. "none" downsamples none
+    parser.add_argument("--layers",  nargs="+", type=int)
+    parser.add_argument("--num_outliers", default=2, type=int)
     config = parser.parse_args() 
     
     world_size = torch.cuda.device_count()
-    #mp.spawn(main, args=(config, world_size), nprocs=world_size) 
-    main(0, config, world_size)
+    mp.spawn(main, args=(config, world_size), nprocs=world_size) 
+    #main(0, config, world_size)
