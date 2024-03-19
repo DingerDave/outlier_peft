@@ -191,7 +191,26 @@ class UpSampleOutput(torch.nn.Module):
         return attention_output
         """
         
-        return upsampled_output        
+        return upsampled_output  
+
+
+def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+def down_sample_kqv(layer, idx):
+    layer.attention.self.num_attention_heads = 2
+    layer.attention.self.attention_head_size = 4
+    layer.attention.self.all_head_size = 8
+    layer.attention.self.query.weight = torch.nn.Parameter(layer.attention.self.query.weight[idx,:])
+    layer.attention.self.query.bias = torch.nn.Parameter(layer.attention.self.query.bias[idx])
+    layer.attention.self.key.weight = torch.nn.Parameter(layer.attention.self.key.weight[idx,:])
+    layer.attention.self.key.bias = torch.nn.Parameter(layer.attention.self.key.bias[idx])
+    layer.attention.self.value.weight = torch.nn.Parameter(layer.attention.self.value.weight[idx,:])
+    layer.attention.self.value.bias = torch.nn.Parameter(layer.attention.self.value.bias[idx])
+    layer.attention.output.dense.weight = torch.nn.Parameter(layer.attention.output.dense.weight[:, idx])
+    return
 
 class AdaptiveBertLayer(torch.nn.Module):
     # add back config is we want. 
@@ -212,6 +231,7 @@ class AdaptiveBertLayer(torch.nn.Module):
         self.attention = layer.attention
         # our function
         self.down_sample_attention = DownSampleAttention(idx)
+        down_sample_kqv(layer, idx)
         self.is_decoder = False #config.is_decoder
         self.add_cross_attention = False #config.add_cross_attention
         # note that we rely on the config from the LAYER. 
@@ -428,3 +448,5 @@ class AdaptiveGPT2Layer(torch.nn.Module):
         outputs = self.c_proj(outputs)
         outputs = self.up_sample_output(outputs, hidden_states)
         return outputs
+    
+
