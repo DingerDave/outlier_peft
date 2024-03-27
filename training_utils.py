@@ -194,9 +194,8 @@ def load_classification_objs(config):
     else: 
         train_data = list(map(classification_preprocess, data["train"]))  
         eval_data = list(map(classification_preprocess, data["validation"])) 
-
-    optimizer =  torch.optim.AdamW(model.parameters(), lr=config.learning_rate) #load optimizer and learning rate. 
-    return model,train_data, eval_data, optimizer
+ 
+    return model,train_data, eval_data
 
 def classification_collate_fn(batch):
     """ Collate function used to make batches for the DataLoader"""  

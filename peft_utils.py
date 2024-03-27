@@ -328,10 +328,6 @@ def outlier_project_gpt2(layer, in_outliers, out_outliers=False):
     layer.c_proj.weight = torch.nn.Parameter(layer.c_proj.weight[:,out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape,3072))
     layer.c_proj.bias = torch.nn.Parameter(layer.c_proj.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))
     layer.c_proj.nf = len(out_outliers)
-    # LayerNorm
-    #layer.output.LayerNorm.weight = torch.nn.Parameter(layer.output.LayerNorm.weight[out_outliers])  #torch.nn.Parameter(torch.ones(outliers_shape))
-    #layer.output.LayerNorm.bias = torch.nn.Parameter(layer.output.LayerNorm.bias[out_outliers]) #torch.nn.Parameter(torch.ones(outliers_shape))
-    #layer.output.LayerNorm.normalized_shape = (out_outliers.shape[0],)
 
     return None
 
@@ -362,15 +358,20 @@ class UpSampleOutput(torch.nn.Module):
     It's not a TON of memory to do this, but still something to think about. 
     """
     
-    def __init__(self, idx):
+    def __init__(self, idx, gpu_id):
         super().__init__()
         self.idx = idx
+        self.gpu_id = gpu_id
         
-    # WE can have different padding if we want. 
+    # can have different padding if we want. 
     def forward(self, x, attention_output):
         # zero padding... for now.
-        # Write some code to specify device. Just being lazy now. 
-        upsampled_output = torch.zeros(attention_output.shape).to("cuda:0")
+        # TODO Write some code to specify device. Just being lazy now.
+
+        # should we get device???
+        # otherwise, we may need to do the downsample inside of trainer...  
+
+        upsampled_output = torch.zeros(attention_output.shape).to(self.gpu_id)
         upsampled_output[:,:,self.idx] = x.type(torch.float32)
         
         # this is how we would do attention padding. 
@@ -393,16 +394,18 @@ class UpSampleOutput(torch.nn.Module):
 
 class AdaptiveGPT2Layer(torch.nn.Module):
     # add back config is we want. 
-    def __init__(self, layer, idx):
+    def __init__(self, layer, idx, gpu_id):
         
         """
         This is just a prototype. Need to clean up. And- hopefully streamline code
         
         Look up config, but we are going to remove it for now. 
         """
-        
+
+        print("ADAPTIVE LAYER GPU ID", gpu_id) 
         
         super().__init__()
+        #self.gpu_id = gpu_id
         self.chunk_size_feed_forward = 8 #config.chunk_size_feed_forward
         self.seq_len_dim = 1
         # note that we rely on the config from the LAYER. 
@@ -414,15 +417,21 @@ class AdaptiveGPT2Layer(torch.nn.Module):
         # note that we rely on the config from the LAYER. 
         self.c_fc = layer.c_fc
         self.act = layer.act
+        
+        # NOTE:
+        # We may want to
+        # 1) pass output of self.act to layer.c_proj.weight. 
+        # 2) UPSAMPLE
+        # 3) ADD BIAS. 
+        # GPT-2 is structured in a way that we are passing in a zero-padded tensor (since there is no residual-connection like BERT)
+        
         self.c_proj = layer.c_proj
         # our function
-        self.up_sample_output = UpSampleOutput(idx)
+        self.up_sample_output = UpSampleOutput(idx, gpu_id)
         
 
     def forward(self, hidden_states: Optional[Tuple[torch.FloatTensor]]) -> torch.FloatTensor:
-
         outputs = self.down_sample_attention(hidden_states)
-    
         outputs = self.c_fc(outputs)
         outputs = self.act(outputs)
         outputs = self.c_proj(outputs)

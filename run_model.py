@@ -21,6 +21,12 @@ import torch.nn as nn
 import json
 import yaml 
 
+def count_trainable_params(model):
+    return sum(param.numel() for param in model.parameters() if param.requires_grad)
+
+def count_all_params(model):
+    return sum(param.numel() for param in model.parameters())
+
 def ddp_setup(rank, world_size):
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
@@ -248,8 +254,11 @@ class IntermediateOutputExtractor(nn.Module):
             self.down_sample_layer(layer, n=n)
 
             
-def main(rank: int, config: dict, world_size: int):
+def main(gpu_id: int, config: dict, world_size: int):
     # Wandb init
+     
+    print(gpu_id)
+    
     print(config) 
     # Monitor everything with wandb. NOTE: only logging metrics for GPU0. So, look at the results files and NOT these. This is just for monitoring experiments.   
     results = {}   
@@ -262,6 +271,9 @@ def main(rank: int, config: dict, world_size: int):
 
     # DAVE TEST CODE BELOW
     model, train_data, eval_data = load_classification_objs(config)
+    
+    print("PARAM COUNT", count_all_params(model))
+    
     train_loader = prepare_dataloader(config, train_data)
     eval_loader = prepare_dataloader(config, eval_data, is_eval=True) 
 
@@ -325,13 +337,9 @@ def main(rank: int, config: dict, world_size: int):
                 param.requires_grad = False 
         # UNFREEZE Adaptive Layer FFNs & Model classifier + pooler 
         for layer in trainable_params:
-            for name, param in layer.named_parameters():
-                
-                """
+            for name, param in layer.named_parameters(): 
                 if "attention" in name:
                     continue 
-                """
-                
                 param.requires_grad = True
 
     elif config.model_name == "gpt2":
@@ -341,8 +349,9 @@ def main(rank: int, config: dict, world_size: int):
             outliers = torch.tensor(adaptive_config[i][:config.num_outliers]) 
             outlier_project_gpt2(model.transformer.h[i].mlp, outliers)
         
-        # STEP 2: Make the layers that were projected above AdaptiveLayers. 
-            model.transformer.h[i].mlp = AdaptiveGPT2Layer(model.transformer.h[i].mlp, outliers)
+        # STEP 2: Make the layers that were projected above AdaptiveLayers.
+        # We may need to add gpu_id to this...  
+            model.transformer.h[i].mlp = AdaptiveGPT2Layer(model.transformer.h[i].mlp, outliers, gpu_id)
      
         trainable_params = [model.transformer.h[i] for i in config.layers]
         # ADD POOLER AND CLASSIFICATION HEAD TO TRAINABLE PARAMS
@@ -355,6 +364,8 @@ def main(rank: int, config: dict, world_size: int):
         # UNFREEZE Adaptive Layer FFNs & Model classifier + pooler 
         for layer in trainable_params:
             for name, param in layer.named_parameters():
+                if "attn" in name:
+                    continue 
                 param.requires_grad = True
         
         for name, param in model.named_parameters():
@@ -363,11 +374,17 @@ def main(rank: int, config: dict, world_size: int):
             else:
                 print("False", name) 
 
+        
+
     # Specifying the correct optimizer params
+    print(count_trainable_params(model))
+    print("PARAM COUNT AFTER DOWNSAMLPE", count_all_params(model))
+
+
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=config.learning_rate)
        
     # STEP 4: Train like normal  
-    trainer = Trainer(config, model, train_loader, eval_loader, optimizer, rank)   
+    trainer = Trainer(config, model, train_loader, eval_loader, optimizer, gpu_id)   
 
     trainer.train()
     print("Training done") 
