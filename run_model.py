@@ -397,8 +397,8 @@ if __name__  == "__main__":
     parser.add_argument("--num_epochs", default=2, type=int)
     parser.add_argument("--batch_size", default=32, type=int) 
     parser.add_argument("--task", default="sst2", type=str)
-    parser.add_argument("--model_name", default="gpt2", type=str)
-    parser.add_argument("--seed", default=1, type=int)  
+    parser.add_argument("--model_name", default="bert", type=str)
+    parser.add_argument("--seed", default=1, type=int)
     # --training also takes the argument "Mini" which will train the model on a very small subset for debugging purposes.
     parser.add_argument("--training", default="True", type=str) 
     parser.add_argument("--learning_rate", default=1e-5, type=float)
