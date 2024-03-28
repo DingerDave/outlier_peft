@@ -118,142 +118,7 @@ class Trainer:
                     # SAVE MODEL AND RUN ANALYSIS 
                     print("DONE") 
                     self._save_model()   
-
-class IntermediateOutputExtractor(nn.Module):
-    def __init__(self, model: nn.Module, layers: Optional[list] = None):
-        """ Wrapper Class for extracting statistics from intermediate layers of a model."""
-        super().__init__()
-        self.model = model
-        
-        # WILLIAM COMMENTS 
-        # TODO: ALSO, we may want to have a functionality where, we can do this projection providing only indices of outliers. 
-        # ^^^ Further, we may want to do this so different layers have different down-projections. 
-        # That way we don't have to run save states every time and we can run the exp for random indices. 
-        
-        if layers is None:
-            self.layers = [module for module in self.model.named_modules()]
-        else:
-            modules = dict([*self.model.named_modules()])
-            
-            self.layers = [(name, modules[name]) for name in layers]
-
-        self.running_raw_values = {layer[0]: None for layer in self.layers}
-        self.layer_output_std = {}
-        self.layer_output_means = {}
-
-        for layer_id, module in self.layers:
-            layer = dict([*self.model.named_modules()])[layer_id]
-            layer.register_forward_hook(self.save_outputs_hook(layer_id))
-
-        
-    def save_outputs_hook(self, layer_id: str) -> Callable:
-
-        def fn(_, __, output): 
-            # runs at each hooked layer
-            if self.running_raw_values[layer_id] is None:
-                # set the outputs
-                self.running_raw_values[layer_id] = output.detach().cpu().numpy()
-            else:
-                # concatenate the outputs
-                 
-                
-                #WILLIAM COMMENT
-                # Changed from dim=0 to dim=1 to stack along the "num_tokens" dimension in the tensor. 
-                # We can't use any torch functions here.     
-                self.running_raw_values[layer_id] = np.concatenate([self.running_raw_values[layer_id], output.detach().cpu().numpy()], axis=1)
-            
-        return fn
-
-    def forward(self, input: dict) -> Dict[str, list]:
-        # move inputs to the correct device
-        input = {key: value.to(next(self.model.parameters()).device) for key, value in input.items()}
-        _ = self.model(**input)
-        return self.running_raw_values
-
-    def save_statistics(self, file_path = None) -> None:
-        
-        for name, values in self.running_raw_values.items():
-
-            if type(values) == torch.Tensor:
-                # If our output is a tensor, we can just detach it and move it to the cpu
-                #   Most outputs are just tensors, for instance the output of a DenseLayer
-                if len(values.shape) == 3:
-                    # If we haven't dealt with the squence length, we just take the classification token
-                    values = values.detach().cpu().numpy()[:,0,:]
-                else:
-                    # WILLIAM COMMENTS
-                    #^^^ To deal with sequence length, we can just reshape to -1, shape.[2] 
-                    values = values.detach().cpu().numpy()
-                
-            else:
-                # If our output is a tuple of tensors, we need to concatenate them and then detach them
-                values = np.reshape(values, (-1, values.shape[-1]))
-                #values = np.concatenate([outputs.last_hidden_state.detach().numpy()[:, 0, :] for outputs in values])
-                
-            # Compute the mean and std of the outputs across all examples    
-            std = np.std(values, axis=0).astype(float)
-            means = np.mean(values, axis=0).astype(float)
-
-            # Match each mean and std to its corresponding dimension, one indexed 
-            # TODO: CHANGE TO ZERO INDEXED
-            ranked_std = list(sorted(zip(list(range(1, len(std)+1)), std), key=lambda x: x[1], reverse=True))
-            ranked_means = list(sorted(zip(list(range(1, len(means)+1)), means), key=lambda x: x[1], reverse=True)) 
-
-            # We store all these stats in a class dictionary for access later
-            self.layer_output_std.update({name: ranked_std})
-            self.layer_output_means.update({name: ranked_means})
-        
-        if file_path is not None:
-            # In case we want to save and view these later
-            with open(file_path, "w") as f:
-                json_able = {name[0] : list(self.layer_output_std[name[0]]) for name in list(self.layers)}
-                f.write(json.dumps(json_able))
-
-    def down_sample_layer(self, layer_name, n=8) -> None:
-        
-        # Get the layers with the highest variance
-        top_layers_idx = [layer[0] for layer in list(self.layer_output_std[layer_name])[:n]]
-        layer = dict([*self.model.named_modules()])[layer_name]
-        mean_vals = {int(row[0]): row[1] for row in self.layer_output_means[layer_name]}
-        
-        # for each dimension not in the top n, set the weights to 0 and the bias to the mean value of the output
-        weight_type = layer.weight.data.dtype
-        kept_weights = {idx: layer.weight.data[idx-1] for idx in top_layers_idx}
-        kept_biases = {idx: layer.bias.data[idx-1] for idx in top_layers_idx}
-    
-        # Recombination point
-        # For now working with dense layers we can just set the weights to 0 and the biases to the mean value of the output
-        # TODO: When doing this we still have to compute the whole thing which is unnecessary. Develop some sort of adaptive dense layer
-        #           that's a good name actually, AdaptiveDenseLayer
-        
-        # WILLIAM COMMENTS:
-        # Right now, we are making the matices sparse,  
-        # FOR device we will have to specify GPU_ID not the specific device
-        idx_means = [torch.tensor([0]*layer.weight.data.shape[1], dtype=weight_type, device="cuda:0") if idx not in top_layers_idx  else kept_weights[idx] for idx in range(1, len(mean_vals)+1)]
-        idx_biases = [torch.tensor(mean_vals[idx], dtype=weight_type, device="cuda:0") if idx not in top_layers_idx else kept_biases[idx] for idx in range(1, len(mean_vals)+1)]
-        
-        # Set the weights and biases
-        # WILLIAM COMMENT:
-        # Need to send to device as well.
-                
-        layer.weight.data = torch.stack(idx_means) #.to("cuda:0")
-        layer.bias.data = torch.tensor(idx_biases) #.to("cuda:0")
-        
-    def down_sample_model(self, layers: list = None, n: int = 8) -> None:
-
-        # For each layer, down sample the weights and biases
-
-        # If we haven't computed the statistics yet, we do so
-        if self.layer_output_std == {}:
-            self.save_statistics()
-
-        if layers is None:
-            layers = [layer[0] for layer in self.layers]
-
-        for layer in layers:
-            self.down_sample_layer(layer, n=n)
-
-            
+   
 def main(gpu_id: int, config: dict, world_size: int):
     # Wandb init
      
@@ -314,33 +179,28 @@ def main(gpu_id: int, config: dict, world_size: int):
     }
 
     #STEP 1: "pre-process" model weights by down-projecting specified layers. 
-    # will clean this up layer, but can specify layer indices in the config, then run this function. 
-    # outliers is a tensor of dimension indices.
     if config.model_name == "bert":  
         adaptive_config = adaptive_config[config.model_name + "-" + config.task]
         for i in config.layers:
             outliers = torch.tensor(adaptive_config[i][:config.num_outliers])
             outlier_project_bert(model.bert.encoder.layer[i], outliers)
 
-        # STEP 2: Make the layers that were projected above AdaptiveLayers. 
+            # STEP 2: Make the layers that were projected above AdaptiveLayers. 
             model.bert.encoder.layer[i] = AdaptiveBertLayer(model.bert.encoder.layer[i], outliers)
+
+    
+        #print("BERT {} SHAPE AFTER DOWNSAMPLING: {}".format("QUERY",str(model.bert.encoder.layer[i].attention.self.query.weight.shape)))
+        #print("BERT {} SHAPE AFTER DOWNSAMPLING: {}".format("KEY",str(model.bert.encoder.layer[i].attention.self.key.weight.shape))) 
+        #print("BERT {} SHAPE AFTER DOWNSAMPLING: {}".format("VALUE",str(model.bert.encoder.layer[i].attention.self.value.weight.shape)))
+        #print("BERT {} SHAPE AFTER DOWNSAMPLING: {}".format("OUTPUT",str(model.bert.encoder.layer[i].attention.output.dense.weight.shape)))
         
-        # How was I freezing params before? I accidentally overwrote it lmao. 
-        # I did it better before. This is a little janky.
+
         # STEP 3: Freeze all non-AdaptiveLayer FF parameter 
         trainable_params = [model.bert.encoder.layer[i] for i in config.layers]
         # ADD POOLER AND CLASSIFICATION HEAD TO TRAINABLE PARAMS
         trainable_params.append(model.bert.pooler)
-        trainable_params.append(model.classifier)  
-        # FREEZE ALL params
-        for _, param in model.named_parameters():
-                param.requires_grad = False 
-        # UNFREEZE Adaptive Layer FFNs & Model classifier + pooler 
-        for layer in trainable_params:
-            for name, param in layer.named_parameters(): 
-                if "attention" in name:
-                    continue 
-                param.requires_grad = True
+        trainable_params.append(model.classifier)
+        freeze_params(model, trainable_params)  
 
     elif config.model_name == "gpt2":
         # This downsamples IN PLACE    
@@ -350,32 +210,14 @@ def main(gpu_id: int, config: dict, world_size: int):
             outlier_project_gpt2(model.transformer.h[i].mlp, outliers)
         
         # STEP 2: Make the layers that were projected above AdaptiveLayers.
-        # We may need to add gpu_id to this...  
             model.transformer.h[i].mlp = AdaptiveGPT2Layer(model.transformer.h[i].mlp, outliers, gpu_id)
      
         trainable_params = [model.transformer.h[i] for i in config.layers]
         # ADD POOLER AND CLASSIFICATION HEAD TO TRAINABLE PARAMS
         trainable_params.append(model.transformer.ln_f)
         trainable_params.append(model.score)
-
-        # FREEZE ALL params
-        for _, param in model.named_parameters():
-                param.requires_grad = False 
-        # UNFREEZE Adaptive Layer FFNs & Model classifier + pooler 
-        for layer in trainable_params:
-            for name, param in layer.named_parameters():
-                if "attn" in name:
-                    continue 
-                param.requires_grad = True
+        freeze_params(model, trainable_params) 
         
-        for name, param in model.named_parameters():
-            if param.requires_grad == True:
-                print("TRUE ", name)
-            else:
-                print("False", name) 
-
-        
-
     # Specifying the correct optimizer params
     print(count_trainable_params(model))
     print("PARAM COUNT AFTER DOWNSAMLPE", count_all_params(model))
